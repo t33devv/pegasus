@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sona Teleop</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d0d0d;
+    color: #d0d0d0;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    gap: 28px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  h1 {
+    font-size: 1.1rem;
+    letter-spacing: 0.25em;
+    color: #666;
+    text-transform: uppercase;
+  }
+
+  #status {
+    font-size: 0.78rem;
+    padding: 5px 18px;
+    border-radius: 20px;
+    border: 1px solid #333;
+    background: #161616;
+    transition: border-color 0.3s, color 0.3s;
+  }
+  #status.connected    { border-color: #4caf50; color: #4caf50; }
+  #status.disconnected { border-color: #e53935; color: #e53935; }
+
+  /* WASD keypad grid */
+  .keypad {
+    display: grid;
+    grid-template-columns: repeat(3, 80px);
+    grid-template-rows: repeat(3, 80px);
+    gap: 8px;
+  }
+
+  .key {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10px;
+    border: 2px solid #2a2a2a;
+    background: #181818;
+    font-size: 1.3rem;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.07s, border-color 0.07s, transform 0.06s, color 0.07s;
+    touch-action: none;
+  }
+  .key .sub {
+    font-size: 0.55rem;
+    font-weight: normal;
+    letter-spacing: 0.08em;
+    color: #555;
+    margin-top: 3px;
+  }
+  .key:hover { border-color: #3a3a3a; background: #1e1e1e; }
+  .key.active {
+    background: #1a3a1a;
+    border-color: #4caf50;
+    color: #4caf50;
+    transform: scale(0.93);
+  }
+  .key.active .sub { color: #4caf50; }
+
+  .key.stop-key { border-color: #2a2a2a; }
+  .key.stop-key.active {
+    background: #3a1a1a;
+    border-color: #e53935;
+    color: #e53935;
+  }
+  .key.stop-key.active .sub { color: #e53935; }
+
+  .key.empty { border: none; background: transparent; cursor: default; pointer-events: none; }
+
+  /* Current command display */
+  #cmd-label {
+    font-size: 0.75rem;
+    letter-spacing: 0.15em;
+    color: #444;
+    height: 1.2em;
+    transition: color 0.15s;
+  }
+  #cmd-label.active { color: #4caf50; }
+
+  /* Hint bar */
+  .hint {
+    font-size: 0.65rem;
+    color: #333;
+    letter-spacing: 0.08em;
+    text-align: center;
+    line-height: 1.8;
+  }
+</style>
+</head>
+<body>
+
+<h1>Sona Teleop</h1>
+
+<div id="status" class="disconnected">disconnected</div>
+
+<div class="keypad">
+  <!-- Row 1 -->
+  <div class="key empty"></div>
+  <div class="key" id="btn-f" data-cmd="f">W<span class="sub">FORWARD</span></div>
+  <div class="key empty"></div>
+
+  <!-- Row 2 -->
+  <div class="key" id="btn-l" data-cmd="l">A<span class="sub">TURN L</span></div>
+  <div class="key stop-key" id="btn-s" data-cmd="s">&#9632;<span class="sub">STOP</span></div>
+  <div class="key" id="btn-r" data-cmd="r">D<span class="sub">TURN R</span></div>
+
+  <!-- Row 3 -->
+  <div class="key empty"></div>
+  <div class="key" id="btn-b" data-cmd="b">S<span class="sub">BACK</span></div>
+  <div class="key empty"></div>
+</div>
+
+<div id="cmd-label">—</div>
+
+<div class="hint">
+  Hold W/A/S/D to move &nbsp;·&nbsp; Release to stop<br>
+  Space = stop &nbsp;·&nbsp; Click/tap buttons on mobile
+</div>
+
+<script>
+const WS_URL   = 'ws://localhost:8765';
+const LABELS   = { f: 'FORWARD', b: 'BACKWARD', l: 'TURN LEFT', r: 'TURN RIGHT', s: 'STOP' };
+const KEY_MAP  = { w: 'f', s: 'b', a: 'l', d: 'r', ' ': 's' };
+const CMD_BTN  = { f: 'btn-f', b: 'btn-b', l: 'btn-l', r: 'btn-r', s: 'btn-s' };
+
+let ws         = null;
+let activeCmd  = null;
+let heldKeys   = new Set();
+
+// ---- WebSocket ----
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    const el = document.getElementById('status');
+    el.textContent = 'connected';
+    el.className   = 'connected';
+  };
+
+  ws.onclose = () => {
+    const el = document.getElementById('status');
+    el.textContent = 'disconnected — retrying…';
+    el.className   = 'disconnected';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+function send(cmd) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(cmd);
+
+  const lbl = document.getElementById('cmd-label');
+  lbl.textContent = LABELS[cmd] || cmd;
+  lbl.className   = (cmd === 's') ? '' : 'active';
+
+  // visual: clear all, activate target
+  Object.values(CMD_BTN).forEach(id => {
+    document.getElementById(id)?.classList.remove('active');
+  });
+  if (CMD_BTN[cmd]) document.getElementById(CMD_BTN[cmd]).classList.add('active');
+
+  activeCmd = (cmd === 's') ? null : cmd;
+}
+
+function stopAll() {
+  send('s');
+  document.getElementById('cmd-label').textContent = '—';
+  document.getElementById('cmd-label').className   = '';
+  Object.values(CMD_BTN).forEach(id => document.getElementById(id)?.classList.remove('active'));
+  activeCmd = null;
+}
+
+// ---- Keyboard (hold-to-drive) ----
+
+document.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  const cmd = KEY_MAP[e.key.toLowerCase()];
+  if (!cmd) return;
+  e.preventDefault();
+  heldKeys.add(e.key.toLowerCase());
+  send(cmd);
+});
+
+document.addEventListener('keyup', e => {
+  const key = e.key.toLowerCase();
+  heldKeys.delete(key);
+  if (KEY_MAP[key] && KEY_MAP[key] !== 's') {
+    // only stop if no other movement key is still held
+    const moving = [...heldKeys].some(k => KEY_MAP[k] && KEY_MAP[k] !== 's');
+    if (!moving) stopAll();
+  }
+});
+
+// ---- Buttons (pointer events — works for mouse and touch) ----
+
+document.querySelectorAll('.key[data-cmd]').forEach(btn => {
+  const cmd = btn.dataset.cmd;
+
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    btn.setPointerCapture(e.pointerId);
+    send(cmd);
+  });
+
+  if (cmd !== 's') {
+    btn.addEventListener('pointerup',    () => stopAll());
+    btn.addEventListener('pointercancel',() => stopAll());
+  }
+});
+
+connect();
+</script>
+</body>
+</html>
