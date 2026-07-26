@@ -34,9 +34,9 @@ LEG_MIN = 20.0
 LEG_MAX = 160.0
 
 # ---- gait tuning ----
-STANCE_Y    = 138.0   # foot depth in stance (mm, +y = down)
-LIFT        =  20.0   # swing arc peak height above stance (mm)
-STRIDE      =  22.0   # half-stride; foot sweeps -STRIDE..+STRIDE in x (mm)
+STANCE_Y    = 132.0   # foot depth in stance (mm, +y = down)
+LIFT        =  18.0   # swing arc peak height above stance (mm)
+STRIDE      =  40.0   # half-stride; foot sweeps -STRIDE..+STRIDE in x (mm)
 STANCE_DUTY =   0.6   # fraction of cycle spent in stance (swing = 1 - this)
 CYCLE_MS    = 1200    # duration of one full step cycle (ms)
 GAIT_CYCLES =   8     # how many cycles to run before stopping
@@ -119,20 +119,26 @@ def torso_ramp(from_frac, to_frac, ms):
 
 # ---- gait trajectory ----
 
+def _ease(t):
+    # smoothstep: zero velocity at both endpoints, cuts the servo-rate spike
+    return t * t * (3.0 - 2.0 * t)
+
 def foot_pos(phase):
     """
     Returns (x, y) foot position for normalised phase in [0, 1).
-    Swing phase (first 40% of cycle): foot lifts in a sine arc, rear → front.
-    Stance phase (last 60%): foot planted at STANCE_Y, sweeps front → rear.
+    Swing (first 40%): eased x so the foot accelerates out of stance and
+    decelerates into touchdown — eliminates the velocity spike at transitions.
+    Stance (last 60%): constant-depth push, linear x sweep.
     """
-    sw = 1.0 - STANCE_DUTY                           # swing duty = 0.4
+    sw = 1.0 - STANCE_DUTY                                  # swing duty = 0.4
     if phase < sw:
-        t = phase / sw                                # 0..1 within swing
-        x = -STRIDE + 2.0 * STRIDE * t               # rear → front
-        y = STANCE_Y - LIFT * math.sin(math.pi * t)  # sine lift arc
+        t  = phase / sw                                     # 0..1 within swing
+        ex = _ease(t)
+        x  = -STRIDE + 2.0 * STRIDE * ex                   # eased rear → front
+        y  = STANCE_Y - LIFT * math.sin(math.pi * t)       # sine lift arc
     else:
-        t = (phase - sw) / STANCE_DUTY               # 0..1 within stance
-        x = STRIDE - 2.0 * STRIDE * t                # front → rear
+        t = (phase - sw) / STANCE_DUTY                     # 0..1 within stance
+        x = STRIDE - 2.0 * STRIDE * t                      # linear front → rear
         y = STANCE_Y
     return x, y
 
