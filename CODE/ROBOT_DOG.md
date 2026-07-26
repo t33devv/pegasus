@@ -202,11 +202,63 @@ costs servo rate proportionally.
 | `torso_test.py` | Torso-only test (4 servos), calibrated, seeds at flat and ramps. |
 | `leg_test_4legs.py` | 8 leg servos, per-leg wiggle, no IK. Confirms pairing + left/right. |
 | `servo_test_4.py` | Simple 4-servo sweep. |
+| `crawl_gait.py` | 4-leg diagonal-pair trot gait. Runs a fixed number of cycles then stops. |
+| `all_dog_test.py` | Full demo sequence: walk forward, torso twist, tripedal balance, walk backward. |
 | `robot_dog_leg_ik.ino`, `robot_dog_leg_walk.ino`, `robot_dog_servos.ino` | **OBSOLETE** — original Arduino/PCA9685 versions. Kept for reference only; the project is now MicroPython on the Servo 2040. |
+| `TELEOP/teleop_dog.py` | **Teleop firmware.** Command-driven gait loop (see §8). Upload as `main.py` to the board. |
+| `TELEOP/main.py` | Exact copy of `teleop_dog.py` — kept as `main.py` so it can be uploaded directly without renaming. Always sync this with `teleop_dog.py` after edits. |
+| `TELEOP/bridge.py` | Laptop-side bridge: serves the web UI on port 8080, WebSocket on port 8765, forwards commands to the board over USB serial. Requires `pip install websockets pyserial`. |
+| `TELEOP/index.html` | WASD controller web page. Served by `bridge.py`. Hold a key to move, release to stop. |
 
-The MicroPython files run via Thonny or VS Code (MicroPico extension). Saving a
+The MicroPython files run via VS Code with the MicroPico extension. Saving a
 file as `main.py` on the board makes it autorun on power-up — only do this after
 testing interactively, since a bad `main.py` can lock up the board.
+
+---
+
+## 8. Teleop system
+
+### Architecture
+```
+Browser (WASD keys)
+    ↓  WebSocket ws://localhost:8765
+bridge.py on laptop
+    ↓  USB serial (115200 baud)
+teleop_dog.py on Servo 2040
+```
+
+The RP2040 has no WiFi. The laptop acts as the bridge between the browser and the board over the existing USB cable.
+
+### Commands (single ASCII bytes)
+| Key | Byte | Behaviour |
+|-----|------|-----------|
+| W | `f` | Walk forward |
+| S | `b` | Walk backward |
+| A | `l` | Spin left (right-side legs forward, left-side legs backward) |
+| D | `r` | Spin right |
+| Space | `s` | Stop — snap legs to home stance |
+
+### Gait parameters (in `teleop_dog.py`)
+Same values as `crawl_gait.py`: `STANCE_Y=132`, `LIFT=18`, `STRIDE=40`, `STANCE_DUTY=0.6`, `CYCLE_MS=1200`.
+
+### Leg grouping for turns
+- `fwd=1` legs (legs 2 & 4, indices 2-3 and 6-7): one physical side
+- `fwd=-1` legs (legs 1 & 3, indices 0-1 and 4-5): the other physical side
+
+Spin is achieved by driving the two sides in opposite directions while keeping the diagonal phase relationship (pair A at phase `p`, pair B at `p+0.5`). If A spins the wrong way, swap `l` and `r` in `CMD_MAP`.
+
+### Workflow
+1. Open `TELEOP/main.py` in VS Code.
+2. Cmd+Shift+P → **"MicroPico: Upload current file to Pico"** — uploads `main.py` to the board.
+3. In the MicroPico terminal press **Ctrl+D** to soft-reset the board; `main.py` starts running.
+4. Close VS Code (releases the serial port — USB cable stays in, board stays powered).
+5. In a terminal: `python3 TELEOP/bridge.py`
+6. Open `http://localhost:8080` in a browser.
+
+To stop: press S/Space on the page (dog stands still), then Ctrl+C in the terminal.
+To reflash: close `bridge.py`, reopen VS Code — MicroPico reconnects automatically.
+
+> **Why close VS Code before running bridge.py:** MicroPico holds the serial port open. Two processes cannot share it. Closing VS Code releases it so `bridge.py` can connect.
 
 ---
 
@@ -214,19 +266,20 @@ testing interactively, since a bad `main.py` can lock up the board.
 
 1. **Verify leg-to-corner mapping and front direction.** Which of legs 1–4 is
    front-left/front-right/rear-left/rear-right, and which body end is front.
-   Everything about a real gait depends on this.
-2. **Build the 4-leg coordinated gait.** The single-leg gait already takes phase
-   as an argument. A trot = diagonal pairs in antiphase: legs at one diagonal at
-   phase p, the other diagonal at p+0.5. Apply the R/L swap (§4).
-3. **Fold in the torso servos.** They roll each leg's plane sideways, turning the
-   2D foot (x,y) into a 3D position. The five-bar IK is unchanged; the torso
-   angle just tilts the plane (a coordinate transform on top). For basic forward
-   walking the torsos can simply hold at STAND.
-4. **Add eased swing profile** to the gait (§4).
-5. **Add collision clamps generally** — the torso safe ranges are the model;
+   The teleop system is working but forward/backward may need the `fwd` signs
+   adjusted once corners are confirmed.
+2. **Fold in the torso servos for arc turning.** Currently turning is a tank spin
+   (both sides driving opposite directions). A smoother arc turn could combine a
+   differential stride with a mild torso lean. Torsos hold at STAND (frac=1.0)
+   during teleop and are not used for steering yet.
+3. **Add eased swing profile** to the gait (§4).
+4. **Add collision clamps generally** — the torso safe ranges are the model;
    confirm what physically collides and at how many degrees for each.
-6. **Measure real current** during standing and walking via the onboard sensor,
+5. **Measure real current** during standing and walking via the onboard sensor,
    to confirm 6A is adequate before going untethered.
+6. **Wireless teleop.** Currently requires USB cable to laptop. A Raspberry Pi Zero
+   or ESP32 mounted on the robot could host the bridge locally and serve over WiFi,
+   making the robot fully untethered.
 
 ## 7. Hard safety rules (learned the hard way)
 
