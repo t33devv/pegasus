@@ -29,6 +29,8 @@ explicitly marked as an assumption to check.
 - Dev setup is 3 wires: USB-C to laptop (logic + programming), and +/- from the
   bench supply (servo power). Because the trace is cut, the supply cannot
   back-feed the laptop, so both can stay connected.
+- **Never physically disconnect USB** — the board loses power and dies. "Disconnect"
+  always means closing VS Code / MicroPico software only.
 - Recommended: set the supply current limit to ~6A so a jammed servo makes the
   supply fold back instead of cooking. A bulk capacitor (1000µF+) across the
   terminals helps absorb startup spikes.
@@ -54,10 +56,34 @@ Header  Index  Role
 Convention: within each leg pair, **odd header = left motor, even = right.**
 
 > NOTE / TO VERIFY: which physical corner each leg (1–4) occupies, and which end
-> of the body is the FRONT, was never nailed down. Needed before a real gait
-> (see §6). The single-leg IK was originally derived with "index 0 = right", but
-> the current wiring is "index 0 (odd header) = left" — so the IK's R/L
-> assignment must be swapped when integrating (see §4).
+> of the body is the FRONT, was never nailed down. The teleop and balance code make
+> assumptions (legs 1&2 = front, 3&4 = back) that need physical verification.
+
+### Sensors
+
+#### VL53L0X — Time-of-Flight distance sensor
+- I2C address **0x29**.
+- Wiring: VCC→3V3, GND→GND, SDA→SDA, SCL→SCL. XSHUT and GPIO1 unconnected.
+- USB power alone is sufficient; 6V servo rail does NOT need to be on.
+- Requires a VL53L0X MicroPython driver uploaded to the board (`vl53l0x.py` or
+  `VL53L0X.py` — `tof_read.py` tries both import names automatically).
+- I2C bus/pin auto-detected at runtime using the same scan logic as `imu_read.py`.
+
+#### MPU6050 — 6-DOF IMU (accelerometer + gyroscope)
+- I2C address **0x68** (AD0→GND, the default). Use 0x69 if AD0 is pulled high —
+  change `MPU_ADDR` in the relevant file.
+- Wiring: VCC→3V3, GND→GND, SDA→SDA, SCL→SCL, AD0→GND.
+- USB power alone is sufficient.
+- **No external driver needed** — all code uses raw I2C register reads.
+- I2C bus/pin auto-detected at runtime.
+
+**Confirmed axis mapping** (sensor as physically mounted on this robot):
+```
+Physical motion       Accel axis   Gyro axis
+Side-to-side (roll)   ax           gy
+Front-to-back (pitch) ay           gx
+```
+If the sensor is remounted, re-verify these with `imu_read.py` before running `balance.py`.
 
 ---
 
@@ -105,6 +131,9 @@ Critical facts about the torsos:
 - Torsos 9 & 12 are mirrored vs 10 & 11 (opposite sides of the body), so "toward
   flat" is decreasing angle for 9/12 and increasing for 10/11. Working in a
   flat→stand fraction (0.0=flat, 1.0=stand) handles this automatically.
+- **Indices 8 & 10 are one physical side of the body; 9 & 11 are the other.**
+  This is used by the lean/balance code: opposite signs on each side produce a
+  lateral lean.
 - **If a torso is commanded past its stop, the legs physically clash.** This
   happened twice during bring-up. Every torso command MUST be clamped to its
   safe range above. Never command a torso to 0/180.
@@ -150,45 +179,34 @@ servo and decreasing the left both RAISE the foot.
 
 ### Reachable workspace (at x=0, WITH the 20–160 servo clamp)
 - Depth range roughly **96.5 to 148 mm**.
-- Full x extent is ±82 mm, but vertical room shrinks fast off-centre
-  (±40 → ~29mm tall; ±80 → ~2mm, unusable).
-- `acos` domain gives two hard limits: D > L1+L2 = 150 (fully straight) and
-  D < |L2−L1| = 90 (can't fold further). `legIK` returns None outside these.
-- **Motion is mushy near full extension** (D near 150): tiny foot moves need huge
-  servo swings (arccos derivative blows up). Keep trajectories in the ~110–140
-  depth band where response is well-conditioned.
+- Full x extent is ±82 mm, but vertical room shrinks fast off-centre.
+- `legIK` returns None outside the reachable range — all callers must check.
+- **Keep trajectories in the ~110–140 mm depth band** where response is
+  well-conditioned. Motion near full extension (D→150) is mushy.
 
 ---
 
-## 4. Walking gait (single leg, proven)
+## 4. Walking gait
 
 Phase-driven, non-blocking. Phase 0.0→1.0 = one step cycle:
-- **Stance** (first `STANCE_DUTY` of cycle): foot planted, sweeps front→rear at
-  constant depth. This pushes the body. MUST be a flat line (no vertical wobble).
-- **Swing** (rest): foot lifts in a sine arc and returns to the front.
+- **Swing** (first 40%): foot lifts in an eased sine arc, steps forward.
+- **Stance** (last 60%): foot planted at constant depth, sweeps rear→front to push body.
 
-Current tuned parameters (verified to stay inside servo limits):
-```
-STANCE_Y   = 138    # foot depth while planted
-LIFT       = 20     # swing arc height
-STRIDE     = 22     # half step length (foot swings -22..+22)
-STANCE_DUTY= 0.6
-CYCLE_MS   = 1200
-```
-Larger strides work too (verified: stance 132 / lift 18 / stride 40 keeps servos
-45–135). Longer stride is the efficient way to add speed; shortening CYCLE_MS
-costs servo rate proportionally.
+4-leg trot: diagonal pairs in antiphase.
+- **Pair A**: legs 1 (idx 0,1, fwd=-1) + leg 4 (idx 6,7, fwd=1) at phase `p`
+- **Pair B**: legs 2 (idx 2,3, fwd=1) + leg 3 (idx 4,5, fwd=-1) at phase `p+0.5`
 
-### Known issues / TODO on the gait
-- **R/L SWAP:** `leg_walk_servo2040.py` defines `R=0, L=1` (from the old
-  single-leg assumption). Current wiring is odd-header=left, so this must become
-  `L=0, R=1` per pair when building the 4-leg version.
-- **Eased swing profile NOT yet added.** At the stance→swing transition x
-  reverses instantly → a servo-rate spike (~538°/s at stride 38) and foot scrub
-  at touchdown. Easing the swing endpoints would cut the peak and reduce slip.
-  This is the top pending improvement.
-- Peak servo rate at aggressive strides may exceed the servos' spec (~0.11s/60°
-  needed). 6V (vs 5V) buys ~20% more speed/torque, which helps.
+Tuned parameters used across `crawl_gait.py`, `teleop_dog.py`, `balance.py`:
+```
+STANCE_Y    = 132   # foot depth while planted (mm)
+LIFT        =  18   # swing arc height (mm)
+STRIDE      =  40   # half-stride length (foot sweeps -40..+40 mm)
+STANCE_DUTY = 0.6
+CYCLE_MS    = 1200
+```
+
+The `fwd` parameter mirrors the x axis for legs facing the opposite end of the
+body. For static poses (balance, tripedal) x=0 so fwd doesn't matter.
 
 ---
 
@@ -196,90 +214,46 @@ costs servo rate proportionally.
 
 | File | What it is |
 |------|-----------|
-| `full_test_12.py` | **Main bring-up test.** All 12 servos: seeds torsos at flat + legs at 90, wiggles each leg while flat (unloaded), stands up, lies down. All channels clamped to safe ranges. |
-| `leg_walk_servo2040.py` | Single-leg IK + walking gait (servo2040/MicroPython). Needs R/L swap for current wiring. |
-| `torso_calibrate_one.py` | Interactive REPL helper to find a torso's true vertical. Set `WHICH`, type angles until vertical. This is how 60/110/110/70 were found. |
-| `torso_test.py` | Torso-only test (4 servos), calibrated, seeds at flat and ramps. |
+| `crawl_gait.py` | 4-leg diagonal-pair trot. Runs a fixed number of cycles then stops. |
+| `all_dog_test.py` | Full demo: walk forward, torso twist, tripedal balance, walk backward. |
+| `torso_calibrate_one.py` | Interactive REPL helper to find a torso's true vertical angle. |
+| `torso_test.py` | Torso-only test — seeds at flat and ramps to stand. |
 | `leg_test_4legs.py` | 8 leg servos, per-leg wiggle, no IK. Confirms pairing + left/right. |
+| `full_test_12.py` | All 12 servos bring-up test. Stand up, wiggle, lie down. |
 | `servo_test_4.py` | Simple 4-servo sweep. |
-| `crawl_gait.py` | 4-leg diagonal-pair trot gait. Runs a fixed number of cycles then stops. |
-| `all_dog_test.py` | Full demo sequence: walk forward, torso twist, tripedal balance, walk backward. |
-| `robot_dog_leg_ik.ino`, `robot_dog_leg_walk.ino`, `robot_dog_servos.ino` | **OBSOLETE** — original Arduino/PCA9685 versions. Kept for reference only; the project is now MicroPython on the Servo 2040. |
-| `TELEOP/teleop_dog.py` | **Teleop firmware.** Command-driven gait loop (see §8). Upload as `main.py` to the board. |
-| `TELEOP/main.py` | Exact copy of `teleop_dog.py` — kept as `main.py` so it can be uploaded directly without renaming. Always sync this with `teleop_dog.py` after edits. |
-| `TELEOP/bridge.py` | Laptop-side bridge: serves the web UI on port 8080, WebSocket on port 8765, forwards commands to the board over USB serial. Requires `pip install websockets pyserial`. |
-| `TELEOP/index.html` | WASD controller web page. Served by `bridge.py`. Hold a key to move, release to stop. |
+| `tof_read.py` | **VL53L0X test.** Auto-detects I2C bus, reads distance in mm. Run to verify sensor wiring before using teleop. |
+| `imu_read.py` | **MPU6050 test.** Auto-detects I2C bus, prints ax/ay/az (g) and gx/gy/gz (°/s) at 5Hz. Run to verify sensor wiring and confirm axis directions before running balance.py. |
+| `balance.py` | **Active balance.** Stands the dog up, calibrates gyro offsets, then continuously adjusts torso servos (roll) and leg depths (pitch) to keep the body level. See §9. |
+| `TELEOP/teleop_dog.py` | **Teleop firmware.** Command-driven gait + ToF obstacle avoidance. Upload as `main.py`. See §8. |
+| `TELEOP/main.py` | Exact copy of `teleop_dog.py` — upload this directly to avoid renaming. Always keep in sync with `teleop_dog.py`. |
+| `TELEOP/bridge.py` | Laptop bridge: HTTP on port 8080, WebSocket on 8765, forwards to serial. `pip install websockets pyserial`. |
+| `TELEOP/index.html` | WASD web controller. Hold key to move, release to stop. |
+| `robot_dog_leg_ik.ino`, `robot_dog_leg_walk.ino`, `robot_dog_servos.ino` | **OBSOLETE** Arduino/PCA9685 originals. Reference only. |
 
-The MicroPython files run via VS Code with the MicroPico extension. Saving a
-file as `main.py` on the board makes it autorun on power-up — only do this after
-testing interactively, since a bad `main.py` can lock up the board.
-
----
-
-## 8. Teleop system
-
-### Architecture
-```
-Browser (WASD keys)
-    ↓  WebSocket ws://localhost:8765
-bridge.py on laptop
-    ↓  USB serial (115200 baud)
-teleop_dog.py on Servo 2040
-```
-
-The RP2040 has no WiFi. The laptop acts as the bridge between the browser and the board over the existing USB cable.
-
-### Commands (single ASCII bytes)
-| Key | Byte | Behaviour |
-|-----|------|-----------|
-| W | `f` | Walk forward |
-| S | `b` | Walk backward |
-| A | `l` | Spin left (right-side legs forward, left-side legs backward) |
-| D | `r` | Spin right |
-| Space | `s` | Stop — snap legs to home stance |
-
-### Gait parameters (in `teleop_dog.py`)
-Same values as `crawl_gait.py`: `STANCE_Y=132`, `LIFT=18`, `STRIDE=40`, `STANCE_DUTY=0.6`, `CYCLE_MS=1200`.
-
-### Leg grouping for turns
-- `fwd=1` legs (legs 2 & 4, indices 2-3 and 6-7): one physical side
-- `fwd=-1` legs (legs 1 & 3, indices 0-1 and 4-5): the other physical side
-
-Spin is achieved by driving the two sides in opposite directions while keeping the diagonal phase relationship (pair A at phase `p`, pair B at `p+0.5`). If A spins the wrong way, swap `l` and `r` in `CMD_MAP`.
-
-### Workflow
-1. Open `TELEOP/main.py` in VS Code.
-2. Cmd+Shift+P → **"MicroPico: Upload current file to Pico"** — uploads `main.py` to the board.
-3. In the MicroPico terminal press **Ctrl+D** to soft-reset the board; `main.py` starts running.
-4. Close VS Code (releases the serial port — USB cable stays in, board stays powered).
-5. In a terminal: `python3 TELEOP/bridge.py`
-6. Open `http://localhost:8080` in a browser.
-
-To stop: press S/Space on the page (dog stands still), then Ctrl+C in the terminal.
-To reflash: close `bridge.py`, reopen VS Code — MicroPico reconnects automatically.
-
-> **Why close VS Code before running bridge.py:** MicroPico holds the serial port open. Two processes cannot share it. Closing VS Code releases it so `bridge.py` can connect.
+The MicroPython files run via VS Code + MicroPico extension.
 
 ---
 
 ## 6. Immediate next steps
 
 1. **Verify leg-to-corner mapping and front direction.** Which of legs 1–4 is
-   front-left/front-right/rear-left/rear-right, and which body end is front.
-   The teleop system is working but forward/backward may need the `fwd` signs
-   adjusted once corners are confirmed.
-2. **Fold in the torso servos for arc turning.** Currently turning is a tank spin
-   (both sides driving opposite directions). A smoother arc turn could combine a
-   differential stride with a mild torso lean. Torsos hold at STAND (frac=1.0)
-   during teleop and are not used for steering yet.
-3. **Add eased swing profile** to the gait (§4).
-4. **Add collision clamps generally** — the torso safe ranges are the model;
-   confirm what physically collides and at how many degrees for each.
+   front-left / front-right / rear-left / rear-right, and which end of the body
+   is front. Affects: `fwd` sign correctness in teleop, FRONT_LEGS/BACK_LEGS in
+   `balance.py`, and any future 3D gait work.
+2. **Verify balance.py axis directions on hardware.** `ROLL_DIR` and `PITCH_DIR`
+   may need flipping, and FRONT_LEGS/BACK_LEGS may be swapped depending on
+   physical corner mapping above.
+3. **Integrate balance into teleop.** `balance.py` is standalone. A future version
+   of `teleop_dog.py` could run the IMU compensation loop in parallel with the
+   gait so the dog self-levels while walking.
+4. **Add eased swing profile** to reduce servo-rate spike at stance→swing
+   transition (see §4).
 5. **Measure real current** during standing and walking via the onboard sensor,
    to confirm 6A is adequate before going untethered.
-6. **Wireless teleop.** Currently requires USB cable to laptop. A Raspberry Pi Zero
-   or ESP32 mounted on the robot could host the bridge locally and serve over WiFi,
-   making the robot fully untethered.
+6. **Wireless teleop.** RP2040 has no WiFi. An ESP32 or Pi Zero mounted on the
+   robot could host `bridge.py` locally and serve over WiFi for untethered driving.
+
+---
 
 ## 7. Hard safety rules (learned the hard way)
 
@@ -289,6 +263,125 @@ To reflash: close `bridge.py`, reopen VS Code — MicroPico reconnects automatic
   and ramp — never snap.
 - **Servos have no position feedback.** Code only knows where it last commanded.
   After any manual repositioning with power off, the first powered move must go
-  to a known safe angle before anything relies on `current` position.
+  to a known safe angle before anything relies on current position.
+- **Never physically disconnect USB** — the trace is cut so USB is the only logic
+  power source. The board dies instantly. "Disconnect" always means software only.
 - **Keep a hand on the servo-power switch** on first run of anything new.
 - Power the servo rail OFF when touching the linkage or reflashing; leave USB on.
+
+---
+
+## 8. Teleop system
+
+### Architecture
+```
+Browser (WASD keys)
+    ↓  WebSocket  ws://localhost:8765
+bridge.py on laptop
+    ↓  USB serial  115200 baud
+teleop_dog.py on Servo 2040
+```
+
+The RP2040 has no WiFi. The laptop bridges between the browser and the board over
+the existing USB cable.
+
+### Commands (single ASCII bytes)
+| Key | Byte | Behaviour |
+|-----|------|-----------|
+| W | `f` | Walk forward (blocked if ToF < 10 cm) |
+| S | `b` | Walk backward |
+| A | `l` | Spin left |
+| D | `r` | Spin right |
+| Space | `s` | Stop — snap legs to home stance |
+
+### Spin / turn implementation
+- `fwd=1` legs (2 & 4, indices 2-3 and 6-7): one physical side
+- `fwd=-1` legs (1 & 3, indices 0-1 and 4-5): the other side
+
+Spin drives the two sides in opposite directions while keeping the diagonal phase
+structure (pair A at `p`, pair B at `p+0.5`). L/R were swapped once in `CMD_MAP`
+after physical testing to get the correct direction.
+
+### ToF obstacle avoidance
+- VL53L0X polled every **5 ticks (100 ms)**.
+- If distance < **100 mm (10 cm)**: `WALK_FWD` is silently blocked; legs freeze.
+- Backward and spin are always allowed.
+- If sensor is missing or driver not found: prints warning, teleop continues
+  without obstacle avoidance.
+- Threshold constant: `OBSTACLE_MM = 100` in `teleop_dog.py`.
+
+### Workflow
+1. Open `TELEOP/main.py` in VS Code.
+2. Cmd+Shift+P → **"MicroPico: Upload current file to Pico"**.
+3. In the MicroPico terminal press **Ctrl+D** to soft-reset — `main.py` autoruns.
+4. **Close VS Code** (releases serial port; USB stays in, board stays powered).
+5. `python3 TELEOP/bridge.py` in a terminal.
+6. Open `http://localhost:8080`.
+
+Stop: press S/Space on the page → Ctrl+C in the terminal.
+Reflash: close `bridge.py` → reopen VS Code → MicroPico reconnects.
+
+---
+
+## 9. Balance system (MPU6050)
+
+### What it does
+`balance.py` stands the dog up, auto-calibrates gyro offsets (2 s at rest), then
+runs a 20 ms control loop that:
+- **Roll** (side tilt) → adjusts all 4 torso servos to lean the legs and
+  counteract the tilt.
+- **Pitch** (front/back tilt) → adjusts front leg depth and back leg depth in
+  opposite directions to level the body front-to-back.
+
+This is a **reactive proportional controller**, not learning. It continuously
+compensates but does not eliminate steady-state error (a small residual tilt
+remains proportional to the gain).
+
+### Sensor fusion — complementary filter
+Both axes use the same filter:
+```
+angle = ALPHA * (angle + gyro_rate * dt) + (1 - ALPHA) * accel_angle
+```
+- Gyro integrates fast motion accurately but drifts over time.
+- Accelerometer gives absolute angle but is noisy.
+- `ALPHA = 0.95` balances speed vs smoothness. Increase toward 0.98 if it
+  oscillates; decrease toward 0.90 if it reacts too slowly.
+
+### Gyro calibration
+At startup, `_CAL_SAMPLES = 100` readings are averaged over ~2 s to measure the
+gyro's zero-rate offset. **Keep the dog completely still during this window.**
+The offsets are applied to every subsequent reading.
+
+### Tuning constants
+```python
+ROLL_GAIN  = 0.022   # torso fraction per degree of roll
+MAX_LEAN   = 0.25    # max torso fraction offset (same as all_dog_test.py twist max)
+ROLL_DIR   = 1       # flip to -1 if roll compensation goes the wrong way
+
+PITCH_GAIN = 1.0     # mm of leg depth change per degree of pitch
+MAX_PITCH  = 15.0    # max depth offset (mm) — STANCE_Y ± 15 stays within IK range
+PITCH_DIR  = 1       # flip to -1 if pitch compensation goes the wrong way
+```
+
+### Leg grouping for pitch (assumed — verify with corner mapping)
+```python
+FRONT_LEGS = [(0, 1), (2, 3)]   # legs 1 & 2
+BACK_LEGS  = [(4, 5), (6, 7)]   # legs 3 & 4
+```
+If the dog pitches the wrong way, either flip `PITCH_DIR` or swap FRONT/BACK.
+
+### Axis mapping (confirmed for current mounting)
+```
+Physical motion       Accel axis   Gyro axis
+Roll (side-to-side)   ax           gy
+Pitch (front/back)    ay           gx
+```
+If the IMU is remounted, re-run `imu_read.py`, tilt the robot each way, and
+confirm which raw axis changes before running `balance.py`.
+
+### Limitations
+- Pitch compensation changes leg depth only — it cannot fix large pitch angles
+  if the leg hits the IK range limit (~96–148 mm depth).
+- No integral term: small steady-state error remains. Adding a PID integral would
+  eliminate it but risks wind-up if not tuned carefully.
+- `balance.py` is standalone — not yet integrated with `teleop_dog.py`.
