@@ -23,6 +23,7 @@ import time
 import math
 import select
 import sys
+from machine import I2C, Pin
 from servo import ServoCluster, Calibration, servo2040
 
 # ---- hardware ----
@@ -54,6 +55,65 @@ TORSO_LIMITS = {
     idx: (min(stand, flat), max(stand, flat))
     for _, idx, stand, flat in TORSO_CAL
 }
+
+# ---- ToF obstacle avoidance ----
+OBSTACLE_MM  = 100   # block forward motion below this distance (10 cm)
+TOF_INTERVAL =   5   # read sensor every N ticks (5 × 20ms = 100ms)
+
+def _find_i2c():
+    combos = []
+    try:
+        combos.append((0, servo2040.SDA, servo2040.SCL))
+        combos.append((1, servo2040.SDA, servo2040.SCL))
+    except Exception:
+        pass
+    for bus in (0, 1):
+        for sda, scl in ((4, 5), (20, 21), (0, 1)):
+            combos.append((bus, sda, scl))
+    for bus, sda, scl in combos:
+        try:
+            i2c = I2C(bus, sda=Pin(sda), scl=Pin(scl))
+            found = i2c.scan()
+            if len(found) > 20: continue   # stuck/shorted bus
+            if 0x29 in found:
+                return i2c
+        except Exception:
+            pass
+    return None
+
+def setup_tof():
+    """Return (tof_object, read_method_name) or (None, None) if unavailable."""
+    i2c = _find_i2c()
+    if i2c is None:
+        print("ToF: not found — obstacle avoidance disabled")
+        return None, None
+    try:
+        import vl53l0x
+        tof = vl53l0x.VL53L0X(i2c)
+    except ImportError:
+        try:
+            from VL53L0X import VL53L0X
+            tof = VL53L0X(i2c)
+        except Exception as e:
+            print("ToF: driver missing —", e)
+            return None, None
+    start = getattr(tof, "start", None)
+    if start: start()
+    for name in ("read", "read_range", "ping"):
+        if getattr(tof, name, None):
+            print("ToF: ready —", name)
+            return tof, name
+    if hasattr(tof, "range"):
+        return tof, "range"
+    print("ToF: unknown driver interface")
+    return None, None
+
+def tof_read_mm(tof_obj, method):
+    try:
+        return tof_obj.range if method == "range" else getattr(tof_obj, method)()
+    except Exception:
+        return 9999   # treat read error as clear path
+
 
 # ---- modes ----
 STOP      = 0
@@ -168,6 +228,11 @@ def main():
 
     print("standing up...")
     torso_ramp(0.0, 1.0, 2500)
+
+    tof_obj, tof_method = setup_tof()
+    last_dist_mm = 9999
+    tof_counter  = 0
+
     print("ready — f/b/l/r/s")
 
     mode = STOP
@@ -182,12 +247,21 @@ def main():
                 if mode == STOP:
                     set_home(home)
 
+        # poll ToF every TOF_INTERVAL ticks
+        tof_counter += 1
+        if tof_counter >= TOF_INTERVAL:
+            tof_counter = 0
+            if tof_obj is not None:
+                last_dist_mm = tof_read_mm(tof_obj, tof_method)
+
+        obstacle = (last_dist_mm < OBSTACLE_MM)
+
         if mode != STOP:
             el = time.ticks_diff(time.ticks_ms(), t0)
             p  = (el % CYCLE_MS) / CYCLE_MS
             pB = (p + 0.5) % 1.0
 
-            if mode == WALK_FWD:
+            if mode == WALK_FWD and not obstacle:
                 apply_leg(0, 1, p,  fwd=-1, direction= 1)
                 apply_leg(6, 7, p,  fwd= 1, direction= 1)
                 apply_leg(2, 3, pB, fwd= 1, direction= 1)
