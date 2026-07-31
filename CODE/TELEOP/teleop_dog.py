@@ -46,6 +46,11 @@ STANCE_DUTY =   0.6
 CYCLE_MS    = 1200
 TICK_MS     =  20
 
+# ---- run parameters (faster gait) ----
+RUN_CYCLE_MS = 700
+RUN_STRIDE   = 55.0
+RUN_LIFT     = 24.0
+
 # ---- torso calibration ----
 TORSO_CAL = [
     ( 9,  8,  60.0, 160.0),
@@ -59,6 +64,7 @@ TORSO_LIMITS = {
 }
 
 # ---- ToF obstacle avoidance ----
+TOF_ENABLED  = False  # set True to block forward motion when obstacle detected
 OBSTACLE_MM  = 100   # block forward motion below this distance (10 cm)
 TOF_INTERVAL =   5   # read sensor every N ticks (5 × 20ms = 100ms)
 
@@ -170,10 +176,14 @@ WALK_FWD  = 1
 WALK_BACK = 2
 TURN_L    = 3
 TURN_R    = 4
+RUN_FWD   = 5
+RUN_BACK  = 6
 
 CMD_MAP = {
     ord('f'): WALK_FWD,
     ord('b'): WALK_BACK,
+    ord('F'): RUN_FWD,
+    ord('B'): RUN_BACK,
     ord('l'): TURN_R,
     ord('r'): TURN_L,
     ord('s'): STOP,
@@ -231,20 +241,20 @@ def set_home(home):
 def _ease(t):
     return t * t * (3.0 - 2.0 * t)
 
-def foot_pos(phase, direction=1):
+def foot_pos(phase, direction=1, stride=STRIDE, lift=LIFT):
     sw = 1.0 - STANCE_DUTY
     if phase < sw:
         t = phase / sw
-        x = direction * (-STRIDE + 2.0 * STRIDE * _ease(t))
-        y = STANCE_Y - LIFT * math.sin(math.pi * t)
+        x = direction * (-stride + 2.0 * stride * _ease(t))
+        y = STANCE_Y - lift * math.sin(math.pi * t)
     else:
         t = (phase - sw) / STANCE_DUTY
-        x = direction * (STRIDE - 2.0 * STRIDE * t)
+        x = direction * (stride - 2.0 * stride * t)
         y = STANCE_Y
     return x, y
 
-def apply_leg(li, ri, phase, fwd=1, direction=1):
-    fx, fy = foot_pos(phase, direction)
+def apply_leg(li, ri, phase, fwd=1, direction=1, stride=STRIDE, lift=LIFT):
+    fx, fy = foot_pos(phase, direction, stride, lift)
     ik = legIK(fx * fwd, fy)
     if ik is None: return
     leg_set(li, ik[0], False)
@@ -465,7 +475,7 @@ def main():
     global _torso_frac
     _torso_frac = 1.0   # track torso position so stand/lay ramp from correct state
 
-    tof_obj, tof_method = setup_tof()
+    tof_obj, tof_method = setup_tof() if TOF_ENABLED else (None, None)
     imu_i2c, gz_offset_raw = setup_imu()
     last_dist_mm = 9999
     tof_counter  = 0
@@ -518,29 +528,34 @@ def main():
                         set_home(home)
 
         # poll ToF every TOF_INTERVAL ticks
-        tof_counter += 1
-        if tof_counter >= TOF_INTERVAL:
-            tof_counter = 0
-            if tof_obj is not None:
-                last_dist_mm = tof_read_mm(tof_obj, tof_method)
+        if TOF_ENABLED:
+            tof_counter += 1
+            if tof_counter >= TOF_INTERVAL:
+                tof_counter = 0
+                if tof_obj is not None:
+                    last_dist_mm = tof_read_mm(tof_obj, tof_method)
 
-        obstacle = (last_dist_mm < OBSTACLE_MM)
+        obstacle = TOF_ENABLED and (last_dist_mm < OBSTACLE_MM)
 
         if mode != STOP:
+            if mode in (RUN_FWD, RUN_BACK):
+                cycle = RUN_CYCLE_MS; s = RUN_STRIDE; lft = RUN_LIFT
+            else:
+                cycle = CYCLE_MS;    s = STRIDE;     lft = LIFT
             el = time.ticks_diff(time.ticks_ms(), t0)
-            p  = (el % CYCLE_MS) / CYCLE_MS
+            p  = (el % cycle) / cycle
             pB = (p + 0.5) % 1.0
 
-            if mode == WALK_FWD and not obstacle:
-                apply_leg(0, 1, p,  fwd=-1, direction= 1)
-                apply_leg(6, 7, p,  fwd= 1, direction= 1)
-                apply_leg(2, 3, pB, fwd= 1, direction= 1)
-                apply_leg(4, 5, pB, fwd=-1, direction= 1)
-            elif mode == WALK_BACK:
-                apply_leg(0, 1, p,  fwd=-1, direction=-1)
-                apply_leg(6, 7, p,  fwd= 1, direction=-1)
-                apply_leg(2, 3, pB, fwd= 1, direction=-1)
-                apply_leg(4, 5, pB, fwd=-1, direction=-1)
+            if mode in (WALK_FWD, RUN_FWD) and not obstacle:
+                apply_leg(0, 1, p,  fwd=-1, direction= 1, stride=s, lift=lft)
+                apply_leg(6, 7, p,  fwd= 1, direction= 1, stride=s, lift=lft)
+                apply_leg(2, 3, pB, fwd= 1, direction= 1, stride=s, lift=lft)
+                apply_leg(4, 5, pB, fwd=-1, direction= 1, stride=s, lift=lft)
+            elif mode in (WALK_BACK, RUN_BACK):
+                apply_leg(0, 1, p,  fwd=-1, direction=-1, stride=s, lift=lft)
+                apply_leg(6, 7, p,  fwd= 1, direction=-1, stride=s, lift=lft)
+                apply_leg(2, 3, pB, fwd= 1, direction=-1, stride=s, lift=lft)
+                apply_leg(4, 5, pB, fwd=-1, direction=-1, stride=s, lift=lft)
             elif mode == TURN_L:
                 # right side (fwd=1 legs) forward, left side (fwd=-1 legs) backward
                 # if it spins the wrong way, swap TURN_L and TURN_R in CMD_MAP

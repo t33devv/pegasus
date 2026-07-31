@@ -1,7 +1,8 @@
 # Pegasus
 Quadruped Robot Dog
 
-![Fusion360 CAD](Fusion360%20CAD.png) ![Photo](Photo.png)
+![Fusion360 CAD](Fusion360%20CAD.png)
+![Photo](Photo.png)
 
 Pegasus has 4 legs, each a parallel five-bar linkage driven by two servos, plus a roll servo per leg (12 servos total). Controlled by a **Pimoroni Servo 2040** (RP2040) running **Pimoroni's MicroPython** connected to **Visual Studio Code** on a laptop.
 
@@ -15,6 +16,7 @@ This is a guide on the contents of this repo:
 
 3. pegasus/CODE/ only has files that contain code. It has a balance of INO (Arduino) and PY (Python) files. Read more at pegasus/CODE/README.md about that specific folder.
 
+---
 
 If you have any questions about Pegasus, make sure to join my [**Discord Community**](https://discord.gg/ShXfuxmhje) :p
 

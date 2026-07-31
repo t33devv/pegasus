@@ -91,7 +91,7 @@ async def run(args):
     async def ws_handler(websocket):
         async for message in websocket:
             cmd = str(message).strip()
-            if cmd in ('f', 'b', 'l', 'r', 's'):
+            if cmd in ('f', 'b', 'F', 'B', 'l', 'r', 's'):
                 bridge.send(cmd)
 
     print(f"  websocket: ws://localhost:{args.ws_port}")

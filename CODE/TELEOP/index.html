@@ -39,6 +39,24 @@
   #status.connected    { border-color: #4caf50; color: #4caf50; }
   #status.disconnected { border-color: #e53935; color: #e53935; }
 
+  #run-toggle {
+    font-size: 0.78rem;
+    padding: 5px 18px;
+    border-radius: 20px;
+    border: 1px solid #333;
+    background: #161616;
+    color: #444;
+    cursor: pointer;
+    letter-spacing: 0.12em;
+    transition: border-color 0.2s, color 0.2s, background 0.2s;
+    user-select: none;
+  }
+  #run-toggle.run {
+    border-color: #ff9800;
+    color: #ff9800;
+    background: #1a1200;
+  }
+
   /* WASD keypad grid */
   .keypad {
     display: grid;
@@ -113,6 +131,8 @@
 
 <div id="status" class="disconnected">disconnected</div>
 
+<div id="run-toggle" title="Press E to toggle">WALK MODE</div>
+
 <div class="keypad">
   <!-- Row 1 -->
   <div class="key empty"></div>
@@ -134,18 +154,37 @@
 
 <div class="hint">
   Hold W/A/S/D to move &nbsp;·&nbsp; Release to stop<br>
-  Space = stop &nbsp;·&nbsp; Click/tap buttons on mobile
+  Space = stop &nbsp;·&nbsp; E = toggle Walk / Run mode
 </div>
 
 <script>
 const WS_URL   = 'ws://localhost:8765';
-const LABELS   = { f: 'FORWARD', b: 'BACKWARD', l: 'TURN LEFT', r: 'TURN RIGHT', s: 'STOP' };
-const KEY_MAP  = { w: 'f', s: 'b', a: 'l', d: 'r', ' ': 's' };
-const CMD_BTN  = { f: 'btn-f', b: 'btn-b', l: 'btn-l', r: 'btn-r', s: 'btn-s' };
+const LABELS   = { f: 'FORWARD', b: 'BACKWARD', F: 'RUN FORWARD', B: 'RUN BACKWARD', l: 'TURN LEFT', r: 'TURN RIGHT', s: 'STOP' };
+const CMD_BTN  = { f: 'btn-f', b: 'btn-b', F: 'btn-f', B: 'btn-b', l: 'btn-l', r: 'btn-r', s: 'btn-s' };
 
 let ws         = null;
 let activeCmd  = null;
 let heldKeys   = new Set();
+let runMode    = false;
+
+function resolveCmd(key) {
+  if (key === 'w') return runMode ? 'F' : 'f';
+  if (key === 's') return runMode ? 'B' : 'b';
+  if (key === 'a') return 'l';
+  if (key === 'd') return 'r';
+  if (key === ' ') return 's';
+  return null;
+}
+
+function toggleRunMode() {
+  runMode = !runMode;
+  const el = document.getElementById('run-toggle');
+  el.textContent = runMode ? 'RUN MODE' : 'WALK MODE';
+  el.className   = runMode ? 'run' : '';
+  // re-send current movement at new speed if a key is held
+  const moving = [...heldKeys].filter(k => k !== ' ');
+  if (moving.length) send(resolveCmd(moving[moving.length - 1]));
+}
 
 // ---- WebSocket ----
 
@@ -196,19 +235,22 @@ function stopAll() {
 
 document.addEventListener('keydown', e => {
   if (e.repeat) return;
-  const cmd = KEY_MAP[e.key.toLowerCase()];
+  const key = e.key.toLowerCase();
+  if (key === 'e') { e.preventDefault(); toggleRunMode(); return; }
+  const cmd = resolveCmd(key);
   if (!cmd) return;
   e.preventDefault();
-  heldKeys.add(e.key.toLowerCase());
+  heldKeys.add(key);
   send(cmd);
 });
 
 document.addEventListener('keyup', e => {
   const key = e.key.toLowerCase();
   heldKeys.delete(key);
-  if (KEY_MAP[key] && KEY_MAP[key] !== 's') {
+  const cmd = resolveCmd(key);
+  if (cmd && cmd !== 's') {
     // only stop if no other movement key is still held
-    const moving = [...heldKeys].some(k => KEY_MAP[k] && KEY_MAP[k] !== 's');
+    const moving = [...heldKeys].some(k => resolveCmd(k) && resolveCmd(k) !== 's');
     if (!moving) stopAll();
   }
 });
@@ -229,6 +271,8 @@ document.querySelectorAll('.key[data-cmd]').forEach(btn => {
     btn.addEventListener('pointercancel',() => stopAll());
   }
 });
+
+document.getElementById('run-toggle').addEventListener('click', toggleRunMode);
 
 connect();
 </script>
